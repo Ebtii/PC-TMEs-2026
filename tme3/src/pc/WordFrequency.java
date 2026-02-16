@@ -8,87 +8,325 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class WordFrequency {
 
-  public static void main(String[] args) throws IOException {
-    String filename = args.length > 0 ? args[0] : "data/WarAndPeace.txt";
-    String mode = args.length > 1 ? args[1] : "hash";
-    int numThreads = args.length > 2 ? Integer.parseInt(args[2]) : 4;
+	public static void main(String[] args) throws IOException {
+		String filename = args.length > 0 ? args[0] : "data/WarAndPeace.txt";
+		String mode = args.length > 1 ? args[1] : "hash";
+		int numThreads = args.length > 2 ? Integer.parseInt(args[2]) : 4;
 
-    File file = new File(filename);
-    if (!file.exists() || !file.canRead()) {
-      System.err.println("Could not open '" + filename + "'. Please provide a readable text file.");
-      System.exit(2);
-    }
+		File file = new File(filename);
+		if (!file.exists() || !file.canRead()) {
+			System.err.println("Could not open '" + filename + "'. Please provide a readable text file.");
+			System.exit(2);
+		}
 
-    long fileSize = file.length();
-    System.out.println("Preparing to parse " + filename + " (mode=" + mode + ", N=" + numThreads + "), containing "
-        + fileSize + " bytes");
+		long fileSize = file.length();
+		System.out.println("Preparing to parse " + filename + " (mode=" + mode + ", N=" + numThreads + "), containing "
+				+ fileSize + " bytes");
 
-    long startTime = System.nanoTime();
+		long startTime = System.nanoTime();
 
-    if (mode.equals("hash")) {
-      // Sequential full-file processing with hash map
-      long totalWords = 0;
-      Map<String, Integer> map = new HashMap<>();
-      try (Scanner scanner = new Scanner(file)) {
-        while (scanner.hasNext()) {
-          String word = cleanWord(scanner.next());
-          if (!word.isEmpty()) {
-            totalWords++;
-            map.compute(word, (w, c) -> c == null ? 1 : c + 1);
-          }
-        }
-      }
-      printResults(totalWords, map);
-    } else if (mode.equals("partition")) {
-      // Single-threaded, loop over ranges with single map
-      long[] parts = FileUtils.partition(file, numThreads);
-      long totalWords = 0;
-      Map<String, Integer> map = new HashMap<>();
+		if (mode.equals("hash")) {
+			// Sequential full-file processing with hash map
+			long totalWords = 0;
+			Map<String, Integer> map = new HashMap<>();
+			try (Scanner scanner = new Scanner(file)) {
+				while (scanner.hasNext()) {
+					String word = cleanWord(scanner.next());
+					if (!word.isEmpty()) {
+						totalWords++;
+						map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+					}
+				}
+			}
+			printResults(totalWords, map);
+		} else if (mode.equals("partition")) {
+			// Single-threaded, loop over ranges with single map
+			long[] parts = FileUtils.partition(file, numThreads);
+			long totalWords = 0;
+			Map<String, Integer> map = new HashMap<>();
 
-      for (int i = 0; i < numThreads; i++) {
-        try (Scanner scanner = new Scanner(FileUtils.getRange(file, parts[i], parts[i + 1]))) {
-          while (scanner.hasNext()) {
-            String word = cleanWord(scanner.next());
-            if (!word.isEmpty()) {
-              totalWords++;
-              map.compute(word, (w, c) -> c == null ? 1 : c + 1);
-            }
-          }
-        }
-      }
-      printResults(totalWords, map);
-    } else {
-      System.err.println("Unknown mode: " + mode);
-      System.exit(1);
-    }
+			for (int i = 0; i < numThreads; i++) {
+				try (Scanner scanner = new Scanner(FileUtils.getRange(file, parts[i], parts[i + 1]))) {
+					while (scanner.hasNext()) {
+						String word = cleanWord(scanner.next());
+						if (!word.isEmpty()) {
+							totalWords++;
+							map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+						}
+					}
+				}
+			}
+			printResults(totalWords, map);
+		} else if (mode.equals("naive")) {
+			long[] parts = FileUtils.partition(file, numThreads);
+			List <Thread> threads= new ArrayList<>() ; 
+			List <NaiveWorker> naives = new ArrayList<>() ; 
+			long[] totalWords = new long[1] ;
+			Map<String, Integer> map = new HashMap<>();
 
-    long endTime = System.nanoTime();
-    long durationMs = (endTime - startTime) / 1_000_000;
-    System.out.println("Total runtime: " + durationMs + " ms for mode " + mode);
-  }
+			for (int i = 0; i < numThreads; i++) {
+				NaiveWorker n = new NaiveWorker(file, parts[i], parts[i+1], map, totalWords) ;
+				naives.add(n);
 
-  private static void printResults(long totalWords, Map<String, Integer> map) {
-    System.out.println("Total words: " + totalWords);
-    System.out.println("Unique words: " + map.size());
+				Thread t = new Thread (n) ;
+				threads.add(t) ;
+				t.start() ;
+			}
+			for (Thread t : threads){
+				try {
+					t.join() ;
+				}catch (InterruptedException e){
+					e.printStackTrace() ; 
+				}
+			}
 
-    List<Map.Entry<String, Integer>> wordList = new ArrayList<>(map.entrySet());
-    wordList.sort((e1, e2) -> {
-      if (!e1.getValue().equals(e2.getValue())) {
-        return Integer.compare(e2.getValue(), e1.getValue()); // desc freq
-      } else {
-        return e1.getKey().compareTo(e2.getKey()); // asc alpha
-      }
-    });
+			printResults(totalWords[0], map);
+		} else if (mode.equals("atomic")) {
+			long[] parts = FileUtils.partition(file, numThreads);
+			List <Thread> threads= new ArrayList<>() ; 
+			AtomicInteger totalWords = new AtomicInteger(0) ;
+			Map<String, Integer> map = new HashMap<>();
 
-    for (Map.Entry<String, Integer> entry : wordList.subList(0, Math.min(5, wordList.size()))) {
-      System.out.println(entry.getValue() + " " + entry.getKey());
-    }
-  }
+			for (int i = 0; i < numThreads; i++) {
+				long deb = parts[i] ;
+				long fin = parts[i+1] ;
 
-  private static String cleanWord(String word) {
-    return word.replaceAll("[^a-zA-Z]", "").toLowerCase();
-  }
+				Runnable tache = () ->{
+					try (Scanner scanner = new Scanner(FileUtils.getRange(file, deb, fin))) {
+						while (scanner.hasNext()) {
+							String word = cleanWord(scanner.next());
+							if (!word.isEmpty()) {
+								totalWords.incrementAndGet();
+								map.compute(word, (w, c) -> c == null ? 1 : c + 1);
+							}
+						}
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				};
+
+				Thread t = new Thread (tache) ;
+				threads.add(t) ;
+				t.start() ;
+			}
+			for (Thread t : threads){
+				try {
+					t.join() ;
+				}catch (InterruptedException e){
+					e.printStackTrace() ; 
+				}
+			}
+
+			printResults(totalWords.get(), map);
+		} else if (mode.equals("synchronized")) {
+			long[] parts = FileUtils.partition(file, numThreads);
+			List <Thread> threads= new ArrayList<>() ; 
+			AtomicInteger totalWords = new AtomicInteger(0) ;
+			Map<String, Integer> map = new HashMap<>();
+
+			for (int i = 0; i < numThreads; i++) {
+				long deb = parts[i] ;
+				long fin = parts[i+1] ;
+
+				Runnable tache = () ->{
+					try (Scanner scanner = new Scanner(FileUtils.getRange(file, deb, fin))) {
+						while (scanner.hasNext()) {
+							String word = cleanWord(scanner.next());
+							if (!word.isEmpty()) {
+								totalWords.incrementAndGet();
+								synchronized(map) {
+									map.compute(word, (w, c) -> c == null ? 1 : c + 1); 
+								}
+							}
+						}
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				};
+
+				Thread t = new Thread (tache) ;
+				threads.add(t) ;
+				t.start() ;
+			}
+			for (Thread t : threads){
+				try {
+					t.join() ;
+				}catch (InterruptedException e){
+					e.printStackTrace() ; 
+				}
+			}
+
+			printResults(totalWords.get(), map);
+		} else if (mode.equals("synchronized2")) {
+			long[] parts = FileUtils.partition(file, numThreads);
+			List <Thread> threads= new ArrayList<>() ; 
+			AtomicInteger totalWords = new AtomicInteger(0) ;
+			Map<String, Integer> map = new HashMap<>();
+			Lock mutex = new ReentrantLock() ; 
+
+			for (int i = 0; i < numThreads; i++) {
+				long deb = parts[i] ;
+				long fin = parts[i+1] ;
+
+				Runnable tache = () ->{
+					try (Scanner scanner = new Scanner(FileUtils.getRange(file, deb, fin))) {
+						while (scanner.hasNext()) {
+							String word = cleanWord(scanner.next());
+							if (!word.isEmpty()) {
+								totalWords.incrementAndGet();
+								if (map.containsKey(word)) {
+									map.put(word, map.get(word) + 1);
+								} else {
+									map.put(word, 1);
+								}
+							}
+						}
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				};
+
+				Thread t = new Thread (tache) ;
+				threads.add(t) ;
+				t.start() ;
+			}
+			for (Thread t : threads){
+				try {
+					t.join() ;
+				}catch (InterruptedException e){
+					e.printStackTrace() ; 
+				}
+			}
+
+			printResults(totalWords.get(), map);
+
+
+		} else if (mode.equals("lock")) {
+			long[] parts = FileUtils.partition(file, numThreads);
+			List <Thread> threads= new ArrayList<>() ; 
+			AtomicInteger totalWords = new AtomicInteger(0) ;
+			Map<String, Integer> map = new HashMap<>();
+			Lock mutex = new ReentrantLock() ; 
+
+			for (int i = 0; i < numThreads; i++) {
+				long deb = parts[i] ;
+				long fin = parts[i+1] ;
+
+				Runnable tache = () ->{
+					try (Scanner scanner = new Scanner(FileUtils.getRange(file, deb, fin))) {
+						while (scanner.hasNext()) {
+							String word = cleanWord(scanner.next());
+							if (!word.isEmpty()) {
+								totalWords.incrementAndGet();
+								try {
+									mutex.lock(); 
+									if (map.containsKey(word)) {
+										map.put(word, map.get(word) + 1);
+									} else {
+										map.put(word, 1);
+									}
+								} finally {
+									mutex.unlock() ; 
+								}
+							}
+						}
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				};
+
+				Thread t = new Thread (tache) ;
+				threads.add(t) ;
+				t.start() ;
+			}
+			for (Thread t : threads){
+				try {
+					t.join() ;
+				}catch (InterruptedException e){
+					e.printStackTrace() ; 
+				}
+			}
+
+			printResults(totalWords.get(), map);
+
+		} else if (mode.equals("decorated")) {
+			long[] parts = FileUtils.partition(file, numThreads);
+			List <Thread> threads= new ArrayList<>() ; 
+			AtomicInteger totalWords = new AtomicInteger(0) ;
+			Map<String, Integer> map = Collections.synchronizedMap(new HashMap<>());
+
+			for (int i = 0; i < numThreads; i++) {
+				long deb = parts[i] ;
+				long fin = parts[i+1] ;
+
+				Runnable tache = () ->{
+					try (Scanner scanner = new Scanner(FileUtils.getRange(file, deb, fin))) {
+						while (scanner.hasNext()) {
+							String word = cleanWord(scanner.next());
+							if (!word.isEmpty()) {
+								totalWords.incrementAndGet();
+								map.compute(word, (w, c) -> c == null ? 1 : c + 1); 
+								/*if (map.containsKey(word)) {
+									map.put(word, map.get(word) + 1);
+								} else {
+									map.put(word, 1);
+								}*/
+							}
+						}
+					} catch (IOException e) {
+						e.printStackTrace();
+				}
+			};
+
+			Thread t = new Thread (tache) ;
+			threads.add(t) ;
+			t.start() ;
+		}
+		for (Thread t : threads){
+			try {
+				t.join() ;
+			}catch (InterruptedException e){
+				e.printStackTrace() ; 
+			}
+		}
+
+		printResults(totalWords.get(), map);
+
+	} else {
+		System.err.println("Unknown mode: " + mode);
+		System.exit(1);
+	}
+
+	long endTime = System.nanoTime();
+	long durationMs = (endTime - startTime) / 1_000_000;
+	System.out.println("Total runtime: " + durationMs + " ms for mode " + mode);
+}
+
+private static void printResults(long totalWords, Map<String, Integer> map) {
+	System.out.println("Total words: " + totalWords);
+	System.out.println("Unique words: " + map.size());
+
+	List<Map.Entry<String, Integer>> wordList = new ArrayList<>(map.entrySet());
+	wordList.sort((e1, e2) -> {
+		if (!e1.getValue().equals(e2.getValue())) {
+			return Integer.compare(e2.getValue(), e1.getValue()); // desc freq
+		} else {
+			return e1.getKey().compareTo(e2.getKey()); // asc alpha
+		}
+	});
+
+	for (Map.Entry<String, Integer> entry : wordList.subList(0, Math.min(5, wordList.size()))) {
+		System.out.println(entry.getValue() + " " + entry.getKey());
+	}
+}
+
+static String cleanWord(String word) {
+	return word.replaceAll("[^a-zA-Z]", "").toLowerCase();
+}
 }
