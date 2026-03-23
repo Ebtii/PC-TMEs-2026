@@ -11,7 +11,7 @@ public class Main {
 	// entre 1 et 100. 
 	// 100 % = rayon par pixel.
 	// 1 % = résolution gros cubes. Utile si on fait un thread par pixel.
-    public static final int DEFAULT_RESOLUTION = 10;  
+    public static final int DEFAULT_RESOLUTION = 20;  
      
 
     public static void main(String[] args) {
